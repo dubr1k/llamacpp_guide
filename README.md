@@ -5,11 +5,13 @@
    - [Установка готового решения](#установка-готового-решения)
    - [Сборка из исходников](#сборка-проекта-актуально-для-ос-на-базе-linux-для-активации-работы-c-gpu)
 2. [Скачивание моделей](#2-скачивание-моделей)
+   - [Напрямую через -hf флаг](#скачивание-модели-напрямую-через-llama-server--llama-cli)
    - [Использование CLI](#скачивание-квантованных-моделей-с-huggingface-через-терминал-powershell)
    - [Ручное скачивание](#скачивание-квантованных-моделей-с-huggingface-напрямую-с-сайта)
 3. [Формат GGUF и квантование](#3-формат-gguf-и-квантование)
    - [Таблица квантований](#типы-квантования)
    - [Расчет VRAM/RAM](#расчёт-памяти)
+- [Unified Memory (Intel Arc, Apple Silicon)](#unified-memory-intel-arc-apple-silicon)
 4. [Ключевые флаги запуска](#4-ключевые-флаги-запуска)
    - [Настройка CPU/GPU](#ресурсы-железа)
    - [Управление контекстом](#память-и-контекст)
@@ -23,7 +25,7 @@
 11. [Решение типичных проблем](#11-решение-типичных-проблем)
 12. [Полезные ссылки](#12-полезные-ссылки)
 
-**llama.cpp** — легковесный движок для инференса LLM, написанный на C++. Позволяет запускать модели в формате **GGUF** (стандартный формат квантованных моделей), используя CPU (инструкции AVX/AVX512) и GPU (CUDA, Metal, Vulkan). Поддерживаются модели семейств LLaMA, Mistral, Qwen2, Qwen2Moe, Phi3, Bloom, Falcon, StableLM, GPT2, Starcoder2, T5, Mamba, Nemotron, Qwen3, Vistral.
+**llama.cpp** — легковесный движок для инференса LLM, написанный на C++. Позволяет запускать модели в формате **GGUF** (стандартный формат квантованных моделей), используя CPU (инструкции AVX/AVX512) и GPU (CUDA, Metal, Vulkan, SYCL). Поддерживаются модели семейств LLaMA, Mistral, Qwen2, Qwen2Moe, Qwen3, Qwen3.5, Phi3, Bloom, Falcon, StableLM, GPT2, Starcoder2, T5, Mamba, Nemotron, Vistral.
 
 ---
 
@@ -52,7 +54,7 @@ brew install llama.cpp
 #### Клонирование репозитория
 
 ```bash
-git clone https://github.com/ggerganov/llama.cpp
+git clone https://github.com/ggml-org/llama.cpp
 cd llama.cpp
 ```
 
@@ -61,6 +63,7 @@ cd llama.cpp
 | Платформа                 | Команда                                                                 |
 | ------------------------- | ----------------------------------------------------------------------- |
 | **NVIDIA (CUDA)**         | `cmake -B build -DGGML_CUDA=ON && cmake --build build --config Release` |
+| **Intel GPU (SYCL)**      | см. раздел ниже                                                         |
 | **CPU-only**              | `cmake -B build && cmake --build build --config Release`                |
 | **Apple Silicon (Metal)** | Ускорение включено по умолчанию при обычной сборке                      |
 
@@ -71,8 +74,29 @@ cd llama.cpp
 **NVIDIA (CUDA):**
 Убедитесь, что установлен CUDA Toolkit. Версия CUDA должна соответствовать вашей видеокарте. После сборки проверьте наличие строки `ggml_cuda_init` в логах при запуске — это подтверждает активацию GPU-ускорения.
 
+**Intel GPU (SYCL / oneAPI):**
+Актуально для Intel Arc, Intel Iris Xe и встроенной графики Lunar Lake. Требует установки [Intel oneAPI Base Toolkit](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit.html).
+
+```bash
+source /opt/intel/oneapi/setvars.sh
+cmake -B build \
+  -DGGML_SYCL=ON \
+  -DCMAKE_C_COMPILER=icx \
+  -DCMAKE_CXX_COMPILER=icpx \
+  -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release -j$(nproc)
+```
+
+После сборки при запуске в логах должна появиться таблица SYCL-устройств, например:
+```
+Found 1 SYCL devices:
+| 0| [level_zero:gpu:0]| Intel Arc Graphics|...
+```
+
+> **Важно для Intel Arc на Lunar Lake/Meteor Lake**: эти GPU используют **Unified Memory** — у них нет выделенной VRAM, они работают с системной RAM. Подробнее в разделе [Unified Memory](#unified-memory-intel-arc-apple-silicon).
+
 **Apple Silicon (Metal):**
-На macOS с процессорами M1/M2/M3/M4 ускорение Metal включается автоматически. При запуске в логах должна появиться строка `ggml_metal_init`, подтверждающая использование GPU. Unified Memory архитектура Apple Silicon позволяет загружать модели, размер которых превышает объём "видеопамяти", так как RAM и VRAM физически едины.
+На macOS с процессорами M1/M2/M3/M4/M5 ускорение Metal включается автоматически. При запуске в логах должна появиться строка `ggml_metal_init`, подтверждающая использование GPU. Unified Memory архитектура Apple Silicon позволяет загружать модели, размер которых превышает объём "видеопамяти", так как RAM и VRAM физически едины.
 
 **CPU-only:**
 Подходит для серверов без GPU или для тестирования. Убедитесь, что ваш процессор поддерживает инструкции AVX2 или AVX512 для оптимальной производительности.
@@ -112,6 +136,27 @@ huggingface-cli download Qwen/Qwen2.5-7B-Instruct-GGUF --local-dir ./models
 - **7b** — размер модели в миллиардах параметров
 - **instruct** — тип модели (instruct/chat для диалогов, base для дообучения)
 - **q4_k_m** — тип квантования
+
+### Скачивание модели напрямую через llama-server / llama-cli
+
+Начиная с актуальных версий llama.cpp, модель можно скачать прямо при запуске — без `huggingface-cli`. Флаг `-hf` принимает путь в формате `автор/репозиторий:квантование`:
+
+```bash
+# Скачать и сразу запустить
+llama-server -hf unsloth/Qwen3.5-9B-GGUF:UD-Q4_K_XL -ngl 33
+
+# Или через llama-cli
+llama-cli -hf unsloth/Qwen3.5-9B-GGUF:Q4_K_M -cnv
+```
+
+Модель скачивается в кэш HuggingFace (`~/.cache/huggingface/hub/`). При повторном запуске загрузка из кэша происходит мгновенно.
+
+**Удаление модели из кэша:**
+```bash
+rm -rf ~/.cache/huggingface/hub/models--unsloth--Qwen3.5-9B-GGUF
+```
+
+---
 
 ### Скачивание квантованных моделей с HuggingFace напрямую с сайта.
 
@@ -210,6 +255,40 @@ python convert_hf_to_gguf.py models/mymodel/ --outfile model.gguf --outtype q8_0
 | 32 ГБ | 34B-70B | Q4_K_M |
 | 48 ГБ | 70B | Q4_K_M или Q5_K_M |
 | 64+ ГБ | 70B+ | Q5_K_M или Q6_K |
+
+---
+
+## Unified Memory (Intel Arc, Apple Silicon)
+
+**Unified Memory** — архитектура, при которой CPU и GPU используют одну и ту же физическую RAM. Характерна для:
+- **Intel Arc на Lunar Lake / Meteor Lake** (встроенная графика)
+- **Apple Silicon (M1/M2/M3/M4/M5)**
+
+**Ключевое отличие от дискретных GPU:**
+
+На дискретной видеокарте (например, RTX 4090) есть своя VRAM — 16/24 GB. Модель должна полностью влезть в эту VRAM, иначе слои уходят на CPU с потерей скорости.
+
+При Unified Memory GPU и CPU работают с одной памятью. Теоретически GPU может использовать всю доступную RAM. Но llama.cpp определяет "свободную" GPU-память по текущему состоянию системы, что может приводить к занижению доступного объёма.
+
+**Практика для Intel Arc (llama.cpp + SYCL):**
+
+По умолчанию llama.cpp использует флаг `-fit on` — автоподбор количества слоёв под "свободную" GPU-память. На Unified Memory это может загрузить всего 0-4 слоя из 33, хотя реально места достаточно.
+
+Решение — отключить автоподбор и задать всё вручную:
+
+```bash
+llama-server \
+  -m model.gguf \
+  -ngl 33 \
+  -fit off \
+  --no-mmap
+```
+
+- `-ngl 33` — загрузить все слои на GPU (подставьте нужное число)
+- `-fit off` — не ограничивать загрузку по "свободной" памяти
+- `--no-mmap` — загрузить модель полностью в RAM (не через memory mapping)
+
+**Для Apple Silicon** `-fit off` обычно не нужен — Metal корректно определяет объём unified memory.
 
 ---
 
@@ -1033,7 +1112,7 @@ llama-cli -m models/model.gguf -ngl 99 -c 4096 -p "Ответь да или не
 |------|--------------|----------|--------------|
 | `--host` | | Адрес для прослушивания | `127.0.0.1` |
 | `--port` | | Порт сервера | `8080` |
-| `-np` | `--n-parallel` | Количество параллельных запросов (слотов) | `1` |
+| `-np` | `--parallel` | Количество параллельных запросов (слотов) | `-1` (авто) |
 | `-cb` | `--cont-batching` | Непрерывный батчинг (подмешивание новых запросов) | Выключено |
 | `--alias` | | Имя модели для API | Имя файла |
 | `--embedding` | | Режим эмбеддингов (для RAG) | Выключено |
@@ -1050,6 +1129,10 @@ llama-cli -m models/model.gguf -ngl 99 -c 4096 -p "Ответь да или не
 | `--api-key-file` | | Файл с API-ключами | — |
 | `--ssl-key-file` | | Путь к SSL-ключу | — |
 | `--ssl-cert-file` | | Путь к SSL-сертификату | — |
+| `-fit` | `--fit` | Автоподбор параметров под свободную память GPU (`on`/`off`) | `on` |
+| `-rea` | `--reasoning` | Thinking/reasoning режим (`on`/`off`/`auto`) | `auto` |
+| `--reasoning-budget` | | Бюджет токенов на раздумья: `-1` без лимита, `0` отключить, `N` — лимит | `-1` |
+| `--no-mmproj` | | Не загружать vision-проектор (multimodal) | — |
 
 ### Примеры команд
 
@@ -1339,6 +1422,23 @@ llama-server -m models/model.gguf --host 0.0.0.0 --port 8080 -ngl 99 -c 8192 -t 
 llama-server -m models/model.gguf --port 8080 -ngl 99 -c 8192 -b 128 -ub 128 -t 4 -tb 12 -n 4096 --flash-attn on --mlock --no-mmap
 ```
 
+### Intel Arc / Lunar Lake (Unified Memory, SYCL)
+
+```bash
+llama-server \
+  -hf unsloth/Qwen3.5-9B-GGUF:Q4_K_M \
+  -ngl 33 \
+  -fit off \
+  -t 8 \
+  -tb 8 \
+  --ctx-size 32768 \
+  -b 512 \
+  -ub 512 \
+  -np 1 \
+  --no-mmap \
+  -rea off
+```
+
 ### Сервер для RAG
 
 ```bash
@@ -1363,11 +1463,12 @@ llama-cli -m models/model.gguf -ngl 99 -c 4096 --system-prompt "Извлекай
 
 ### Модель не загружается на GPU
 
-**Диагностика:** Проверьте наличие `ggml_metal_init` или `ggml_cuda_init` в логах.
+**Диагностика:** Проверьте наличие `ggml_metal_init`, `ggml_cuda_init` или таблицы SYCL devices в логах.
 
 **Решения:**
-1. Добавьте `-ngl 99`
+1. Добавьте `-ngl 99` (или конкретное число слоёв)
 2. Пересоберите с поддержкой GPU
+3. Для Intel SYCL: добавьте `-fit off` (см. раздел [Unified Memory](#unified-memory-intel-arc-apple-silicon))
 
 ### Нехватка памяти
 
@@ -1376,6 +1477,7 @@ llama-cli -m models/model.gguf -ngl 99 -c 4096 --system-prompt "Извлекай
 2. Используйте Q4_K_M вместо Q8_0
 3. Уменьшите `-ngl` (частичная загрузка на GPU)
 4. Включите `--flash-attn on`
+5. Отключите vision-проектор: `--no-mmproj`
 
 ### Перегрев (Mac)
 
@@ -1399,14 +1501,50 @@ llama-cli -m models/model.gguf -ngl 99 -c 4096 --system-prompt "Извлекай
 2. Используйте `--json-schema` с `strict: true`
 3. Добавьте примеры в системный промпт
 
+### Intel SYCL: `libdnnl.so.3: cannot open shared object file`
+
+SYCL-бэкенд требует библиотеку `libdnnl` из Intel oneAPI. Если после сборки с SYCL бинарники не запускаются:
+
+```bash
+# Зарегистрировать путь к libdnnl системно
+echo "/opt/intel/oneapi/dnnl/latest/lib" | sudo tee /etc/ld.so.conf.d/intel-dnnl.conf
+sudo ldconfig
+```
+
+### Intel SYCL: `No device of requested type available`
+
+SYCL не видит GPU — не загружаются адаптеры Level Zero / OpenCL из-за отсутствия `libumf.so.1`.
+
+**Диагностика:**
+```bash
+/opt/intel/oneapi/compiler/latest/bin/sycl-ls --verbose
+```
+
+**Решение:**
+```bash
+# Создать симлинк
+sudo ln -s /opt/intel/oneapi/compiler/latest/opt/compiler/lib/libumf.so \
+           /opt/intel/oneapi/compiler/latest/opt/compiler/lib/libumf.so.1
+
+# Зарегистрировать путь
+echo "/opt/intel/oneapi/compiler/latest/opt/compiler/lib" | sudo tee /etc/ld.so.conf.d/intel-compiler-opt.conf
+sudo ldconfig
+
+# Проверить
+/opt/intel/oneapi/compiler/latest/bin/sycl-ls
+# Должны появиться [level_zero:gpu:0] и [opencl:gpu:0]
+```
+
 ---
 
 ## 12. Полезные ссылки
 
-- **Репозиторий:** https://github.com/ggerganov/llama.cpp
+- **Репозиторий:** https://github.com/ggml-org/llama.cpp
 - **Модели GGUF:** https://huggingface.co/models?library=gguf
-- **Грамматики:** https://github.com/ggerganov/llama.cpp/tree/master/grammars
+- **Грамматики:** https://github.com/ggml-org/llama.cpp/tree/master/grammars
 - **JSON Schema Spec:** https://json-schema.org/
+- **Intel oneAPI Base Toolkit:** https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit.html
+- **Unsloth GGUF (качественные кванты):** https://huggingface.co/unsloth
 
 ---
 
