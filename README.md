@@ -20,12 +20,16 @@
    - [Параметры сэмплинга (Temp, Top-P)](#параметры-генерации-сэмплинг)
 5. [System Prompt (Системный промпт)](#5-system-prompt-системный-промпт)
 6. [Структурированный вывод (JSON/GBNF)](#6-структурированный-вывод-json-schema-grammar)
-7. [llama-cli: консольный режим](#7-llama-cli-консольный-режим)
-8. [llama-server: API-сервис](#8-llama-server-api-сервис)
-9. [Диагностика и мониторинг](#9-диагностика-и-мониторинг)
-10. [Шаблоны команд](#10-шаблоны-команд)
-11. [Решение типичных проблем](#11-решение-типичных-проблем)
-12. [Полезные ссылки](#12-полезные-ссылки)
+7. [Мультимодальные модели (VLM / mmproj)](#7-мультимодальные-модели-vlm--mmproj)
+8. [Prompt Caching и бесконечный контекст (Context Shift)](#8-prompt-caching-и-бесконечный-контекст-context-shift)
+9. [Нативный вызов инструментов (Function Calling / Tool Use)](#9-нативный-вызов-инструментов-function-calling--tool-use)
+10. [llama-cli: консольный режим](#10-llama-cli-консольный-режим)
+11. [llama-server: API-сервис](#11-llama-server-api-сервис)
+12. [Диагностика и мониторинг](#12-диагностика-и-мониторинг)
+13. [Шаблоны команд](#13-шаблоны-команд)
+14. [Автозапуск в продакшене (systemd и macOS launchd)](#14-автозапуск-в-продакшене-systemd-и-macos-launchd)
+15. [Решение типичных проблем](#15-решение-типичных-проблем)
+16. [Полезные ссылки](#16-полезные-ссылки)
 
 **llama.cpp** — легковесный движок для инференса LLM, написанный на C++. Позволяет запускать модели в формате **GGUF** (стандартный формат квантованных моделей), используя CPU (инструкции AVX/AVX512) и GPU (CUDA, Metal, Vulkan, SYCL). Поддерживаются модели семейств LLaMA, Mistral, Qwen2, Qwen2Moe, Qwen3, Qwen3.5, Phi3, Bloom, Falcon, StableLM, GPT2, Starcoder2, T5, Mamba, Nemotron, Vistral.
 
@@ -1087,7 +1091,177 @@ llama.cpp включает набор готовых грамматик в ди�
 
 ---
 
-## 7. llama-cli: консольный режим
+## 7. Мультимодальные модели (VLM / mmproj)
+
+Современные мультимодальные модели (Vision-Language Models) работают в llama.cpp через связку двух компонентов:
+1. **Базовый языковой чекпоинт (LLM):** основной GGUF-файл модели (текстовые трансформерные веса).
+2. **Мультимодальный проектор (`mmproj`):** адаптер и веса энкодера зрения (CLIP/SigLIP/Qwen-ViT), упакованные в отдельный GGUF (например, `mmproj-F16.gguf` или квантованный `mmproj-Q8_0.gguf`).
+
+### Актуальные архитектуры (2025–2026)
+
+| Семейство моделей | Базовый квант | Файл проектора | Особенности |
+|---|---|---|---|
+| **Qwen 3.5 / 3.6 VL** (9B, 27B, 35B-A3B) | `Qwen3.5-9B-UD-Q4_K_XL.gguf` | `mmproj-F16.gguf` / `mmproj-q8_0.gguf` | Нативная поддержка видео и изображений высокого разрешения, архитектура с динамическим разрешением |
+| **Gemma 4 Vision** (12B, 26B-A4B, 31B) | `gemma-4-12B-it-UD-Q4_K_XL.gguf` | `gemma-4-12B-it.mmproj-BF16.gguf` | Высокая точность OCR и анализа диаграмм |
+| **GLM-4.6V / GLM-5.2 Vision** | `GLM-4.6V-Flash-Q4_K_M.gguf` | `GLM-4.6V-Flash-mmproj-GGUF.gguf` | Отличная работа со сложным многоязычным текстом и скриншотами UI |
+
+### Запуск мультимодального сервера
+
+```bash
+llama-server   -m models/Qwen3.5-9B-UD-Q4_K_XL.gguf   --mmproj models/Qwen3.5-9B-mmproj-BF16.gguf   --port 8080   -ngl 999   --flash-attn on   -c 32768
+```
+
+> **Важно:** Если мультимодальная модель запускается исключительно для работы с текстом (например, в IDE или агенте), используйте флаг `--no-mmproj`. Это сэкономит 1.5–4 GB памяти и ускорит инициализацию.
+
+### Отправка изображения через OpenAI-совместимый API (Python)
+
+```python
+import base64
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8080/v1", api_key="sk-no-key-required")
+
+def encode_image(image_path):
+    with open(image_path, "rb") as f:
+        return base64.b64encode(f.read()).decode("utf-8")
+
+image_b64 = encode_image("document.png")
+
+response = client.chat.completions.create(
+    model="qwen-vl",
+    messages=[
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Опиши подробно, что изображено на этой схеме, и извлеки текст таблицы."},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/png;base64,{image_b64}"
+                    }
+                }
+            ]
+        }
+    ],
+    max_tokens=1024
+)
+
+print(response.choices[0].message.content)
+```
+
+---
+
+## 8. Prompt Caching и бесконечный контекст (Context Shift)
+
+При работе с ИИ-агентами, анализом больших кодовых баз и в IDE-ассистентах (Continue, Cline, OpenClaw) префилл тяжелого контекста (системный промпт, правила проекта, документация на 30–60k токенов) при каждом новом запросе может занимать от 10 секунд до минуты. Движок llama.cpp предлагает два встроенных механизма для мгновенного отклика и предотвращения вылетов при переполнении контекста.
+
+### 1. Сохранение и повторное использование кэша (`--prompt-cache`)
+
+Кэширует состояние KV-кэша вычисленного префилла на диск.
+
+| Флаг | Описание | Применение |
+|---|---|---|
+| `--prompt-cache <file>` | Путь к файлу кэша промпта | Сохраняет и переиспользует вычисленный префилл |
+| `--prompt-cache-all` | Кэшировать не только системный промпт, но и промежуточный контекст | Полезно для сессий диалогов с постепенным дополнением |
+| `--prompt-cache-ro` | Режим «только для чтения» | Защищает эталонный кэш системного промпта от перезаписи |
+
+```bash
+# Пример: прогрев и кэширование огромного системного промпта и архитектуры проекта
+llama-cli   -m models/qwen3.5-27b-q4_k_m.gguf   -f system_project_context.txt   --prompt-cache cache/project_context.bin   --prompt-cache-all   -ngl 999 -c 65536
+```
+При следующем старте llama.cpp мгновенно считывает готовый кэш из `cache/project_context.bin` — время ожидания префилла сокращается до **0.1 секунды**.
+
+### 2. Context Shift (`--ctx-shift`) — «бесконечный» диалог
+
+По умолчанию, когда суммарный объем диалога превышает размер контекстного окна (`-c`), сервер либо падает с ошибкой, либо обрезает генерацию.
+Флаг `--ctx-shift` активирует скользящее окно (rolling context window):
+- Системный промпт в начале контекста блокируется и **всегда сохраняется**.
+- Самые старые пользовательские сообщения и ответы середины диалога автоматически сдвигаются и вытесняются.
+- Модель продолжает разговор без перезагрузки и без потери системных инструкций.
+
+```bash
+llama-server -m model.gguf -c 16384 --ctx-shift --port 8080 -ngl 999
+```
+
+---
+
+## 9. Нативный вызов инструментов (Function Calling / Tool Use)
+
+В актуальных версиях `llama-server` встроен нативный движок Function Calling, полностью совместимый со спецификацией OpenAI API. Движок использует chat template модели (в формате Jinja) и самостоятельно транслирует вызовы функций в специальный формат модели (`<tool_call>`, `<tool_response>` и т.д.) и обратно.
+
+### Пример: Вызов инструментов через Python OpenAI SDK
+
+```python
+import json
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8080/v1", api_key="sk-local")
+
+# Описываем доступные функции (Tools)
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_server_status",
+            "description": "Получить текущую нагрузку и свободную память сервера по имени хоста",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "hostname": {
+                        "type": "string",
+                        "description": "Имя хоста, например srv-ams-01"
+                    }
+                },
+                "required": ["hostname"]
+            }
+        }
+    }
+]
+
+messages = [
+    {"role": "user", "content": "Проверь, пожалуйста, что сейчас с нагрузкой на сервере srv-ams-01?"}
+]
+
+# Отправляем запрос с инструментами
+response = client.chat.completions.create(
+    model="qwen3.5-9b",
+    messages=messages,
+    tools=tools,
+    tool_choice="auto"
+)
+
+response_message = response.choices[0].message
+
+# Проверяем, решила ли модель вызвать функцию
+if response_message.tool_calls:
+    for tool_call in response_message.tool_calls:
+        func_name = tool_call.function.name
+        func_args = json.loads(tool_call.function.arguments)
+        print(f"-> Модель вызвала функцию: {func_name} с аргументами: {func_args}")
+        
+        # Эмуляция выполнения локальной функции
+        tool_output = json.dumps({"cpu_load": "12%", "ram_free_gb": 48.5, "status": "healthy"})
+        
+        # Передаем результат выполнения обратно модели
+        messages.append(response_message)
+        messages.append({
+            "role": "tool",
+            "tool_call_id": tool_call.id,
+            "name": func_name,
+            "content": tool_output
+        })
+        
+    final_response = client.chat.completions.create(
+        model="qwen3.5-9b",
+        messages=messages
+    )
+    print("Итоговый ответ модели:")
+    print(final_response.choices[0].message.content)
+```
+
+---
+
+## 10. llama-cli: консольный режим
 
 **llama-cli** — интерактивный интерфейс командной строки для работы с моделью в режиме диалога или однократной генерации.
 
@@ -1175,7 +1349,7 @@ llama-cli -m models/model.gguf -ngl 99 -c 4096 -p "Ответь да или не
 
 ---
 
-## 8. llama-server: API-сервис
+## 11. llama-server: API-сервис
 
 Запуск **llama-server** превращает модель в постоянно работающий микросервис, совместимый с **OpenAI API**. Это позволяет использовать модель из любых приложений, поддерживающих OpenAI API.
 
@@ -1391,7 +1565,7 @@ curl http://localhost:8080/v1/chat/completions \
 
 ---
 
-## 9. Диагностика и мониторинг
+## 12. Диагностика и мониторинг
 
 ### Вывод при запуске
 
@@ -1445,7 +1619,7 @@ llama_print_timings:       total time =    6000.00 ms /   150 tokens
 
 ---
 
-## 10. Шаблоны команд
+## 13. Шаблоны команд
 
 ### Минимальный запуск CLI
 
@@ -1558,7 +1732,128 @@ llama-cli -m models/model.gguf -ngl 99 -c 4096 --system-prompt "Извлекай
 
 ---
 
-## 11. Решение типичных проблем
+## 14. Автозапуск в продакшене (systemd и macOS launchd)
+
+Запуск `llama-server` в сессиях терминала или через `screen`/`tmux` не защищает от сбоев при перезагрузке машины или внезапных OOM. Для постоянной работы рекомендуется настроить автозапуск через нативный диспетчер служб.
+
+### 1. Linux: Сервис systemd (`/etc/systemd/system/llama-server.service`)
+
+Создайте файл службы:
+```bash
+sudo nano /etc/systemd/system/llama-server.service
+```
+
+Вставьте конфигурацию (адаптируйте пути под свою систему):
+```ini
+[Unit]
+Description=Llama.cpp OpenAI Compatible Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/llama.cpp
+ExecStart=/usr/local/bin/llama-server \
+    -m /opt/models/model-q4_k_m.gguf \
+    --host 0.0.0.0 \
+    --port 8080 \
+    -ngl 999 \
+    --flash-attn on \
+    -b 2048 \
+    -ub 1024 \
+    -ctk q8_0 \
+    -ctv q8_0 \
+    -c 32768 \
+    --mlock \
+    --cont-batching \
+    --metrics
+
+Restart=always
+RestartSec=5
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Активация и управление:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now llama-server
+sudo systemctl status llama-server
+# Просмотр логов в реальном времени:
+journalctl -u llama-server -f
+```
+
+---
+
+### 2. macOS: Агент launchd (`~/Library/LaunchAgents/ai.llama.server.plist`)
+
+Для пользователей Mac Studio и MacBook Pro агент `launchd` запускает сервер в фоне в контексте пользователя при входе в систему с автоматическим GPU-ускорением Metal:
+
+Создайте файл:
+```bash
+nano ~/Library/LaunchAgents/ai.llama.server.plist
+```
+
+Содержимое:
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ai.llama.server</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/llama-server</string>
+        <string>-m</string>
+        <string>/Users/Shared/models/model-Q4_K_M.gguf</string>
+        <string>--port</string>
+        <string>8080</string>
+        <string>-ngl</string>
+        <string>999</string>
+        <string>--flash-attn</string>
+        <string>on</string>
+        <string>-b</string>
+        <string>2048</string>
+        <string>-ub</string>
+        <string>1024</string>
+        <string>-t</string>
+        <string>8</string>
+        <string>-tb</string>
+        <string>8</string>
+        <string>-ctk</string>
+        <string>q8_0</string>
+        <string>-ctv</string>
+        <string>q8_0</string>
+        <string>-c</string>
+        <string>32768</string>
+        <string>--mlock</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/llama-server.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/llama-server.err</string>
+</dict>
+</plist>
+```
+
+Запуск службы на Mac:
+```bash
+launchctl load ~/Library/LaunchAgents/ai.llama.server.plist
+# Проверить статус или остановить:
+launchctl list | grep llama
+launchctl unload ~/Library/LaunchAgents/ai.llama.server.plist
+```
+
+---
+
+## 15. Решение типичных проблем
 
 ### Модель не загружается на GPU
 
@@ -1656,7 +1951,7 @@ sudo ldconfig
 
 ---
 
-## 12. Полезные ссылки
+## 16. Полезные ссылки
 
 - **Репозиторий:** https://github.com/ggml-org/llama.cpp
 - **Модели GGUF:** https://huggingface.co/models?library=gguf
